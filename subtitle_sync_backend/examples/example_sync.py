@@ -51,8 +51,8 @@ except ModuleNotFoundError:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync subtitles with video audio using the processing module.")
-    parser.add_argument("video", help="Path to the video file (e.g., .mp4, .mkv, etc.).")
-    parser.add_argument("subtitle", help="Path to the subtitle file (.srt, .vtt, .ass, .ssa).")
+    parser.add_argument("--video", help="Path to the video file (e.g., .mp4, .mkv, etc.).")
+    parser.add_argument("--subtitle", help="Path to the subtitle file (.srt, .vtt, .ass, .ssa).")
     parser.add_argument(
         "--prefer-whisper",
         action="store_true",
