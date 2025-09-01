@@ -10,6 +10,9 @@ It:
 - Invokes the core synchronization function
 - Prints the path to the synced subtitle file
 
+For a full end-to-end example (transcription + RAG + LLM correction + saving),
+see: examples/example_end_to_end_rag_llm.py
+
 Usage:
   python examples/example_sync.py /path/to/video.mp4 /path/to/subtitles.srt [--prefer-whisper] [--whisper-model base] [--output-dir /tmp]
 
