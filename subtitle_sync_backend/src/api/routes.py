@@ -18,6 +18,14 @@ class SyncResponse(BaseModel):
     synced_subtitle_path: str = Field(..., description="Absolute path to the synced subtitle file.")
     format: str = Field(..., description="Subtitle format: srt | vtt | ass")
     shift_seconds: str = Field(..., description="Applied shift to align subtitles with transcription.")
+    entries: list | None = Field(
+        default=None,
+        description="Full-video transcription segments to be used for RAG/LLM corrections. Each entry: {start,end,text}.",
+    )
+    entries_path: str | None = Field(
+        default=None,
+        description="Absolute path to the JSON file containing 'entries' within the job workdir.",
+    )
 
 class SyncJobResult(BaseModel):
     job_id: str = Field(..., description="Job identifier for this processing run.")
@@ -69,6 +77,7 @@ async def sync_subtitles(
             whisper_model=whisper_model,
         )
         job_id = os.path.basename(workdir)
+        # SyncResponse model accepts optional entries and entries_path
         return SyncJobResult(job_id=job_id, result=SyncResponse(**result_dict))
     except SubtitleSyncError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

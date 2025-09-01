@@ -21,7 +21,7 @@ import uuid
 import tempfile
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 
 # Supported subtitle extensions
 SUPPORTED_SUB_EXTENSIONS = {".srt", ".vtt", ".ass", ".ssa"}
@@ -51,7 +51,11 @@ class BaseTranscriber:
 
     # PUBLIC_INTERFACE
     def transcribe(self, audio_or_video_path: str) -> List[TranscriptSegment]:
-        """Transcribe the given audio or video file and return segments."""
+        """Transcribe the given audio or video file and return segments.
+
+        Returns:
+            List[TranscriptSegment]: Ordered, contiguous or non-contiguous segments that cover the full audio where possible.
+        """
         raise NotImplementedError
 
 
@@ -396,18 +400,22 @@ def process_and_sync_subtitles(
     output_dir: str,
     prefer_whisper: bool = False,
     whisper_model: str = "base",
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """
     Process video and subtitle files:
     - Transcribe audio using StubTranscriber by default, or Whisper if prefer_whisper=True and available.
     - Parse subtitles
     - Estimate shift using naive approach and apply
     - Write adjusted subtitle to output_dir with suffix '-synced'
+    - Persist full transcription segments as 'entries' JSON for later RAG/LLM usage
+
     Returns:
     {
       "synced_subtitle_path": "<path>",
       "format": "srt|vtt|ass",
       "shift_seconds": "<float as str>",
+      "entries": [ { "start": float, "end": float, "text": str }, ... ],
+      "entries_path": "<absolute path to JSON file with entries>"
     }
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -420,8 +428,25 @@ def process_and_sync_subtitles(
             # Fallback to stub if whisper unavailable
             transcriber = StubTranscriber()
 
-    # Transcribe
+    # Transcribe entire video
     transcript = transcriber.transcribe(video_path)
+
+    # Serialize transcript segments into dicts for portability
+    entries: List[Dict[str, Any]] = [
+        {"start": float(seg.start), "end": float(seg.end), "text": seg.text}
+        for seg in transcript
+    ]
+
+    # Also persist to JSON file for downstream RAG steps within same workdir
+    entries_path = os.path.join(output_dir, "transcript_entries.json")
+    try:
+        import json
+
+        with open(entries_path, "w", encoding="utf-8") as jf:
+            json.dump(entries, jf, ensure_ascii=False, indent=2)
+    except Exception:
+        # Do not fail main processing if persistence fails; entries are still returned in-memory.
+        entries_path = ""
 
     # Parse subtitle
     fmt = detect_subtitle_format(subtitle_path)
@@ -432,20 +457,20 @@ def process_and_sync_subtitles(
         sub_content = f.read()
 
     header = ""
-    entries: List[SubtitleEntry] = []
+    sub_entries: List[SubtitleEntry] = []
     if fmt == "srt":
-        entries = parse_srt(sub_content)
+        sub_entries = parse_srt(sub_content)
     elif fmt == "vtt":
-        entries = parse_vtt(sub_content)
+        sub_entries = parse_vtt(sub_content)
     else:
-        header, entries = parse_ass_ssa(sub_content)
+        header, sub_entries = parse_ass_ssa(sub_content)
 
-    if not entries:
+    if not sub_entries:
         raise SubtitleSyncError("No subtitle entries parsed.")
 
     # Estimate shift and apply
-    shift = _estimate_shift_from_transcript(transcript, entries)
-    shifted = _apply_shift(entries, shift)
+    shift = _estimate_shift_from_transcript(transcript, sub_entries)
+    shifted = _apply_shift(sub_entries, shift)
     shifted = _clamp_nonnegative(shifted)
 
     # Format output
@@ -467,6 +492,8 @@ def process_and_sync_subtitles(
         "synced_subtitle_path": out_path,
         "format": fmt,
         "shift_seconds": f"{shift:.3f}",
+        "entries": entries,           # full transcription segments for RAG/LLM
+        "entries_path": entries_path, # persisted JSON location (may be empty if persistence failed)
     }
 
 
