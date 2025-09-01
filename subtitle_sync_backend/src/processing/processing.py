@@ -491,12 +491,37 @@ def process_and_sync_subtitles(
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(content_out)
 
+    # Attempt LLM correction pass with RAG context; write a sibling file if successful.
+    corrected_variant_path = ""
+    try:
+        from .correction import correct_subtitles_with_llm, apply_corrected_texts  # local import to avoid cycles
+        # Compute RAG and corrected texts
+        corrected_texts, _rag = correct_subtitles_with_llm(shifted, entries, fmt=fmt, k=10)
+        corrected_entries = apply_corrected_texts(shifted, corrected_texts)
+        # Write corrected file alongside synced one
+        base_name_noext, ext = os.path.splitext(os.path.basename(out_path))
+        corrected_name = f"{base_name_noext}-llm{ext}"
+        corrected_variant_path = os.path.join(output_dir, corrected_name)
+        if fmt == "srt":
+            corrected_content = format_srt(corrected_entries)
+        elif fmt == "vtt":
+            corrected_content = format_vtt(corrected_entries)
+        else:
+            corrected_content = format_ass_ssa(header, corrected_entries)
+        with open(corrected_variant_path, "w", encoding="utf-8") as cf:
+            cf.write(corrected_content)
+    except Exception:
+        # LLM correction is optional; ignore failures to keep base pipeline robust.
+        corrected_variant_path = ""
+
     return {
         "synced_subtitle_path": out_path,
         "format": fmt,
         "shift_seconds": f"{shift:.3f}",
         "entries": entries,           # full transcription segments for RAG/LLM
         "entries_path": entries_path, # persisted JSON location (may be empty if persistence failed)
+        # Expose optional corrected variant path for clients that want it
+        "llm_corrected_subtitle_path": corrected_variant_path or None,
     }
 
 

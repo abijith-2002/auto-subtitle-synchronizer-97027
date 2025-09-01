@@ -13,6 +13,8 @@ from .processing import (
     rag_top_k_for_subtitles,
 )
 from .rag import retrieve_top_k_for_cue, retrieve_top_k_for_cues
+from .llm import correct_cue_with_rag, batch_correct_cues_with_rag
+from .correction import correct_subtitles_with_llm, apply_corrected_texts
 
 __all__ = [
     "BaseTranscriber",
@@ -26,4 +28,8 @@ __all__ = [
     "rag_top_k_for_subtitles",
     "retrieve_top_k_for_cue",
     "retrieve_top_k_for_cues",
+    "correct_cue_with_rag",
+    "batch_correct_cues_with_rag",
+    "correct_subtitles_with_llm",
+    "apply_corrected_texts",
 ]

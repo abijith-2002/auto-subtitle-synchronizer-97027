@@ -26,6 +26,10 @@ class SyncResponse(BaseModel):
         default=None,
         description="Absolute path to the JSON file containing 'entries' within the job workdir.",
     )
+    llm_corrected_subtitle_path: str | None = Field(
+        default=None,
+        description="Optional path to an LLM-corrected variant of the synced subtitle."
+    )
 
 class SyncJobResult(BaseModel):
     job_id: str = Field(..., description="Job identifier for this processing run.")
