@@ -43,7 +43,8 @@ def _check_sdk() -> Optional[str]:
             f"Details: {exc}"
         )
 
-
+from dotenv import load_dotenv
+load_dotenv()
 def _get_api_key(env_var: str = "GEMINI_API_KEY") -> Optional[str]:
     return os.getenv(env_var)
 
@@ -55,7 +56,7 @@ def _safe_one_liner(text: str) -> str:
 
 
 # PUBLIC_INTERFACE
-def run_test(model: str = "gemini-1.5-pro") -> int:
+def run_test(model: str = "gemini-1.5-flash") -> int:
     """
     PUBLIC_INTERFACE
     Run a minimal prompt against Gemini using google.genai and print the result.
@@ -81,16 +82,19 @@ def run_test(model: str = "gemini-1.5-pro") -> int:
         return 3
 
     api_key = _get_api_key("GEMINI_API_KEY")
+    # print("api_key",api_key)
     if not api_key:
         print(
             "Error: Missing GEMINI_API_KEY environment variable.\n"
             "- Request this secret from the user and set it via .env (do not hardcode).\n"
             "- Example (bash): export GEMINI_API_KEY='your_key_here'\n",
+            f"api_key is {api_key}",
             file=sys.stderr,
         )
         return 1
-
+    print("api_key",api_key)
     try:
+        
         client = genai.Client(api_key=api_key)
     except Exception as exc:
         print(f"Error: Failed to create google.genai Client: {exc}", file=sys.stderr)
