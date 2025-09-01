@@ -116,6 +116,112 @@ class WhisperTranscriber(BaseTranscriber):
             raise TranscriptionError(f"Whisper transcription failed: {exc}") from exc
 
 
+class GeminiGenAITranscriber(BaseTranscriber):
+    """
+    Transcriber that uses Google's official google.genai SDK to perform multimodal
+    transcription with Gemini. This avoids any direct REST calls.
+
+    Environment:
+        GEMINI_API_KEY must be set via environment variables (do not hardcode).
+    """
+    def __init__(self, model_name: str = "gemini-1.5-pro", api_key_env: str = "GEMINI_API_KEY"):
+        try:
+            from google import genai  # type: ignore
+            from google.genai import types as genai_types  # type: ignore
+        except Exception as exc:
+            raise TranscriptionError(
+                "google.genai SDK not installed. Please add 'google-genai' to requirements.txt."
+            ) from exc
+        import os as _os
+        self._genai = genai
+        self._types = genai_types
+        self._model = model_name
+        self._api_key_env = api_key_env
+        self._api_key = _os.getenv(api_key_env)
+        if not self._api_key:
+            raise TranscriptionError(f"Missing API key. Set environment variable {api_key_env}.")
+        self._client = genai.Client(api_key=self._api_key)
+
+    # PUBLIC_INTERFACE
+    def transcribe(self, audio_or_video_path: str) -> List[TranscriptSegment]:
+        try:
+            with open(audio_or_video_path, "rb") as f:
+                data = f.read()
+        except Exception as exc:
+            raise TranscriptionError(f"Failed to read media: {exc}") from exc
+
+        file_part = self._types.Blob(mime_type="video/mp4", data=data)
+        instruction = (
+            "Transcribe this media. If possible, return JSON array 'segments' with items "
+            '{"start": <seconds>, "end": <seconds>, "text": "<content>"}; '
+            "otherwise return a clean transcript text."
+        )
+        try:
+            result = self._client.models.generate_content(
+                model=self._model,
+                contents=[
+                    self._types.Content(
+                        role="user",
+                        parts=[
+                            self._types.Part.from_text(instruction),
+                            self._types.Part.from_blob(file_part),
+                        ],
+                    )
+                ],
+            )
+        except Exception as exc:
+            raise TranscriptionError(f"Gemini SDK request failed: {exc}") from exc
+
+        # Extract text
+        text_response = ""
+        try:
+            for cand in getattr(result, "candidates", []) or []:
+                content = getattr(cand, "content", None)
+                if not content:
+                    continue
+                for part in getattr(content, "parts", []) or []:
+                    if hasattr(part, "text") and part.text:
+                        text_response += part.text + "\n"
+        except Exception:
+            pass
+        text_response = (text_response or "").strip()
+
+        # Parse segments JSON if present
+        import json as _json, re as _re
+        segments: List[TranscriptSegment] = []
+        parsed = None
+        if text_response:
+            try:
+                start_idx = text_response.find("[")
+                end_idx = text_response.rfind("]")
+                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                    block = text_response[start_idx : end_idx + 1]
+                    parsed = _json.loads(block)
+            except Exception:
+                parsed = None
+        if isinstance(parsed, list):
+            for item in parsed:
+                try:
+                    start = float(item.get("start", 0.0))
+                    end = float(item.get("end", max(start + 1.0, 1.0)))
+                    text = str(item.get("text", "")).strip()
+                    if text:
+                        segments.append(TranscriptSegment(start=start, end=end, text=text))
+                except Exception:
+                    continue
+        if not segments:
+            if not text_response:
+                return []
+            # Fallback naive split
+            lines = [ln.strip() for ln in _re.split(r"[.\n]+", text_response) if ln.strip()]
+            t = 0.0
+            dur = 3.5
+            for ln in lines:
+                segments.append(TranscriptSegment(start=t, end=t + dur, text=ln + "."))
+                t += dur
+        return segments
+
+
 # ---------------------------------------------
 # Subtitle parsing and formatting utilities
 # ---------------------------------------------

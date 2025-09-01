@@ -46,3 +46,5 @@ sentence-transformers>=2.2.2
 numpy>=1.24.0
 # Optional: LLM client for subtitle correction via RAG
 openai>=1.50.0
+# Official Google Generative AI Python SDK
+google-genai>=0.3.0

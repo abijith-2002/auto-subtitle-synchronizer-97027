@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Example: End-to-end subtitle syncing using Gemini AI API (transcription) with simple RAG alignment.
+Example: End-to-end subtitle syncing using Gemini AI via google.genai SDK (transcription) with simple RAG alignment.
 
 This example demonstrates how to:
   1) Load a video and a subtitle file
-  2) Transcribe the video's audio using Gemini AI API
+  2) Transcribe the video's audio using Google Gemini via the official google.genai SDK
   3) Compute a naive time shift and retrieve top-K transcript segments per cue (RAG)
   4) Produce a synced subtitle file and a simple RAG preview JSON
 
@@ -14,19 +14,14 @@ For production-grade usage, prefer the built-in pipeline:
 
 Authentication and configuration:
 - Reads Gemini API key from environment variable: GEMINI_API_KEY
-- If no native Gemini SDK is available, this script uses HTTP requests.
-- You can optionally install the google-generativeai SDK and set it up, but this
-  example sticks to HTTP for portability.
+- Uses the google.genai Python SDK exclusively (no direct REST calls).
 
 Environment variables (do NOT hardcode secrets in code; set them via .env):
 - GEMINI_API_KEY: API key for Gemini AI
 
 Dependencies:
-- Standard library only for core logic.
-- For HTTP invocation:
-  - Either ensure 'httpx' is installed (already included in backend requirements),
-    or alternatively you can replace httpx with Python's urllib if needed.
-  The backend already includes httpx in requirements.txt, so importing httpx should work.
+- google-genai (official Google Generative AI Python SDK)
+  pip install google-genai
 
 Inputs:
 - Video file path (e.g., attachments/2mins.mp4)
@@ -52,8 +47,7 @@ If you prefer to run directly, ensure PYTHONPATH includes the backend src:
 Notes:
 - This script uses a simple, transparent flow and mirrors some logic from the backend processing
   in a minimal way for demonstration.
-- The RAG retrieval uses TF-IDF-like scoring if sentence-transformers is not available.
-- Place sample files (video and subtitle) anywhere and pass their paths via CLI arguments.
+- The RAG retrieval uses TF-IDF-like scoring; no external vector DB is required.
 """
 
 from __future__ import annotations
@@ -67,11 +61,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-# Try to import httpx which is already part of backend requirements
+# Use google.genai SDK for Gemini access (no direct REST).
 try:
-    import httpx
+    from google import genai  # type: ignore
+    from google.genai import types as genai_types  # type: ignore
 except Exception:
-    httpx = None  # We'll error with instructions if missing.
+    genai = None  # handled later with a clear error
+    genai_types = None
 
 # --- Minimal subtitle parsing/formatting utilities (adapted for this demo) ---
 
@@ -296,7 +292,11 @@ class SimpleVectorizer:
         for doc in corpus:
             for t in set(self._tokenize(doc)):
                 df[t] = df.get(t, 0) + 1
-        self._idf = {t: 1.0 + (0.0 if df[t] == 0 else (float(__import__("math").log(N / (1 + df[t]))))) for t in df}
+        import math
+        self._idf = {
+            t: 1.0 + (0.0 if df[t] == 0 else float(math.log(N / (1 + df[t]))))
+            for t in df
+        }
 
     def vectorize(self, text: str) -> Dict[str, float]:
         toks = self._tokenize(text)
@@ -343,7 +343,7 @@ class SimpleVectorizer:
         return scores[: max(1, k)]
 
 
-# --- Gemini transcription via HTTP ---
+# --- Gemini transcription via google.genai SDK (no REST) ---
 
 class GeminiTranscriptionError(Exception):
     pass
@@ -360,116 +360,97 @@ class TranscriptSegment:
 def transcribe_with_gemini(video_path: str, api_key_env: str = "GEMINI_API_KEY") -> List[TranscriptSegment]:
     """
     PUBLIC_INTERFACE
-    Transcribe the provided video file using Gemini AI API (HTTP).
+    Transcribe the provided video file using google.genai SDK (no direct REST).
 
     Parameters:
-        video_path: Absolute path to the video file (audio track will be used by Gemini's server-side processing).
-        api_key_env: Environment variable name holding the Gemini API key (default: GEMINI_API_KEY).
+        video_path: Absolute path to the video file.
+        api_key_env: Env var name with the Gemini API key (default: GEMINI_API_KEY).
 
     Returns:
-        List[TranscriptSegment] with approximate start/end times (if model returns timestamps);
-        if timestamps are not returned, segments will be naive splits.
+        List[TranscriptSegment] with approximate start/end times if available; otherwise
+        segments are derived from the returned text using a naive splitter.
 
     Notes:
-        - This demo uses a plausible HTTP flow for Gemini; actual endpoints and request formats
-          may differ depending on the model and API version. Adjust accordingly to your Gemini access.
-        - If httpx is unavailable, raises an informative error.
+        - Uses gemini-1.5-pro by default which supports multimodal inputs.
+        - Requires: pip install google-genai
+        - Do not hardcode keys; set them via environment variables.
     """
-    if httpx is None:
+    if genai is None or genai_types is None:
         raise GeminiTranscriptionError(
-            "httpx is required for HTTP calls. Please ensure it is installed (already in backend requirements)."
+            "google.genai SDK not installed. Please add 'google-genai' to requirements.txt."
         )
+
     api_key = os.getenv(api_key_env)
     if not api_key:
         raise GeminiTranscriptionError(
             f"Missing API key. Please set the environment variable {api_key_env}."
         )
 
-    # Placeholder endpoint and headers for illustrative purposes.
-    # Replace 'model' with a transcription-capable Gemini model you have access to.
-    # For example, "models/gemini-1.5-pro" with audio input support.
-    GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key,
-    }
-
-    # For demo purposes, send a "task description" and attach file as base64 bytes via "inline_data".
-    # In reality, you might upload the media to GCS and reference it, or use a multipart endpoint if supported.
-    import base64
+    # Read video bytes
     try:
         with open(video_path, "rb") as vf:
             video_bytes = vf.read()
     except Exception as e:
         raise GeminiTranscriptionError(f"Failed to read video file: {e}") from e
 
-    b64 = base64.b64encode(video_bytes).decode("utf-8")
-
-    # The prompt asks for a transcript broken into segments with start/end times if possible.
-    # Some Gemini multimodal models can infer timestamps; if not, we'll split text afterward.
+    client = genai.Client(api_key=api_key)
     system_instruction = (
         "You are a transcription assistant. Transcribe the following video/audio input. "
-        "If possible, provide JSON with segments including start, end (in seconds), and text. "
-        "If precise timestamps are unavailable, still return a coherent transcript text."
+        "If possible, return a JSON array with items: "
+        '{"start": <seconds>, "end": <seconds>, "text": "<content>"}. '
+        "If timestamps are unavailable, return a clean transcript text."
     )
 
-    payload: Dict[str, Any] = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {"text": system_instruction},
-                    {
-                        "inline_data": {
-                            "mime_type": "video/mp4",
-                            "data": b64,
-                        }
-                    },
-                ],
-            }
-        ]
-    }
+    # Build content parts: instruction + media
+    file_part = genai_types.Blob(mime_type="video/mp4", data=video_bytes)
 
     try:
-        resp = httpx.post(GEMINI_ENDPOINT, headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
+        result = client.models.generate_content(
+            model="gemini-1.5-pro",
+            contents=[
+                genai_types.Content(
+                    role="user",
+                    parts=[
+                        genai_types.Part.from_text(system_instruction),
+                        genai_types.Part.from_blob(file_part),
+                    ],
+                )
+            ],
+        )
     except Exception as e:
-        raise GeminiTranscriptionError(f"Gemini HTTP request failed: {e}") from e
+        raise GeminiTranscriptionError(f"Gemini SDK request failed: {e}") from e
 
-    # Attempt to extract structured segments from Gemini response.
-    # Adjust this parsing logic to match your actual Gemini response schema.
+    # Extract text from the response parts
     text_response = ""
     try:
-        # Typical structure: candidates[0].content.parts[].text
-        candidates = data.get("candidates", [])
-        if candidates:
-            parts = candidates[0].get("content", {}).get("parts", [])
-            for p in parts:
-                if "text" in p:
-                    text_response += p["text"] + "\n"
+        for cand in getattr(result, "candidates", []) or []:
+            content = getattr(cand, "content", None)
+            if not content:
+                continue
+            for part in getattr(content, "parts", []) or []:
+                if hasattr(part, "text") and part.text:
+                    text_response += part.text + "\n"
     except Exception:
         pass
 
     text_response = (text_response or "").strip()
 
-    # Try to parse JSON segment structure if present.
+    # Try to parse a JSON array from the response
     segments: List[TranscriptSegment] = []
-    parsed_json = None
+    parsed = None
     if text_response:
-        # Heuristic: search for a JSON-like array of segments in the output
         try:
-            # Basic extraction: look for the last JSON-looking block
+            # Heuristic: locate the array if response wraps JSON in prose
             start_idx = text_response.find("[")
             end_idx = text_response.rfind("]")
             if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
                 block = text_response[start_idx : end_idx + 1]
-                parsed_json = json.loads(block)
+                parsed = json.loads(block)
         except Exception:
-            parsed_json = None
+            parsed = None
 
-    if isinstance(parsed_json, list):
-        for item in parsed_json:
+    if isinstance(parsed, list):
+        for item in parsed:
             try:
                 start = float(item.get("start", 0.0))
                 end = float(item.get("end", max(start + 1.0, 1.0)))
@@ -479,17 +460,15 @@ def transcribe_with_gemini(video_path: str, api_key_env: str = "GEMINI_API_KEY")
             except Exception:
                 continue
 
-    # Fallback: if no structured segments, split plain transcript into rough chunks.
     if not segments:
         if not text_response:
             raise GeminiTranscriptionError("No transcription text returned by Gemini.")
-        # Split into sentences/lines; assign naive timings (e.g., 3s per line).
+        # Naive sentence split with approximate duration
         lines = [ln.strip() for ln in re.split(r"[.\n]+", text_response) if ln.strip()]
         start = 0.0
         approx_dur = 3.5
-        for i, ln in enumerate(lines):
-            seg = TranscriptSegment(start=start, end=start + approx_dur, text=ln + ".")
-            segments.append(seg)
+        for ln in lines:
+            segments.append(TranscriptSegment(start=start, end=start + approx_dur, text=ln + "."))
             start += approx_dur
 
     return segments
@@ -571,7 +550,7 @@ def _ensure_out_dir(out_dir: Optional[str]) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="End-to-end subtitle syncing using Gemini AI transcription and simple RAG.")
+    parser = argparse.ArgumentParser(description="End-to-end subtitle syncing using Gemini AI transcription (google.genai) and simple RAG.")
     parser.add_argument("--video", required=False, default="attachments/2mins.mp4", help="Path to the video file.")
     parser.add_argument("--subtitle", required=False, default="attachments/2mins_inaccurate.srt", help="Path to the subtitle file (.srt/.vtt/.ass/.ssa).")
     parser.add_argument("--output-dir", default=None, help="Directory to write outputs. Defaults to a temporary directory.")
@@ -598,11 +577,11 @@ def main() -> int:
         print("Unsupported subtitle format. Use .srt, .vtt, .ass, or .ssa", file=sys.stderr)
         return 2
 
-    print("=== Gemini RAG Subtitle Sync Demo ===")
+    print("=== Gemini RAG Subtitle Sync Demo (google.genai) ===")
     print(f"Video:      {video_path}")
     print(f"Subtitle:   {subtitle_path}")
     print(f"Output dir: {out_dir}")
-    print("Step 1) Transcribing with Gemini...")
+    print("Step 1) Transcribing with Gemini via google.genai...")
 
     try:
         segments = transcribe_with_gemini(video_path=video_path, api_key_env="GEMINI_API_KEY")
@@ -673,7 +652,7 @@ def main() -> int:
     print("")
     print("All steps completed.")
     print("Reminder:")
-    print("- Set GEMINI_API_KEY in your environment before running this script.")
+    print("- Ensure google-genai is installed and GEMINI_API_KEY is set before running this script.")
     print("- Place your sample files anywhere and point to them with --video and --subtitle.")
     print("- This script focuses on Gemini transcription and basic RAG retrieval;")
     print("  for LLM-based correction using OpenAI-compatible models, see example_end_to_end_rag_llm.py.")
