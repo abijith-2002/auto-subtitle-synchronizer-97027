@@ -164,18 +164,20 @@ def _get_llm_client() -> Any:
 
 def _clean_llm_text(s: str) -> str:
     """
-    Normalize LLM outputs:
-    - Strip surrounding quotes, code fences or markup
-    - Collapse whitespace
+    Normalize LLM outputs by using a robust parser that extracts a single corrected line.
+    Falls back to a minimal cleanup if parser import fails.
     """
-    s = (s or "").strip()
-    # Remove simple code fences
-    if s.startswith("```") and s.endswith("```"):
-        s = s.strip("`").strip()
-    # Remove leading/trailing quotes
-    s = s.strip('"').strip("'").strip()
-    # Collapse whitespace
-    return " ".join(s.split())
+    try:
+        from .parser import extract_corrected_line_from_response  # local import
+        cleaned = extract_corrected_line_from_response(s or "")
+        return cleaned
+    except Exception:
+        # Minimal fallback
+        s = (s or "").strip()
+        if s.startswith("```") and s.endswith("```"):
+            s = s.strip("`").strip()
+        s = s.strip('"').strip("'").strip()
+        return " ".join(s.split())
 
 
 def _retry_with_backoff(callable_fn, max_retries: int = 2, base_delay: float = 0.5) -> Tuple[bool, str]:

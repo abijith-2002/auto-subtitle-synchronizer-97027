@@ -35,6 +35,10 @@ def correct_subtitles_with_llm(
         (corrected_texts, rag_results)
         corrected_texts: list of LLM-improved text strings aligned with subtitle_entries
         rag_results: list of top-k results per cue used as context
+
+    Notes:
+        The corrected_texts are derived via robust parsing of LLM outputs to guard against
+        code fences, JSON-wrapped values, bullet lists, and label prefixes.
     """
     # Prepare cues in dict form
     cues = [{"text": s.text, "start": s.start, "end": s.end} for s in subtitle_entries]
