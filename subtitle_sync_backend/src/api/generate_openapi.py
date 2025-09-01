@@ -3,6 +3,11 @@ import os
 
 from src.api.main import app
 
+"""
+Utility script to generate the OpenAPI schema into interfaces/openapi.json.
+Run this after modifying routes or models to refresh the spec.
+"""
+
 # Get the OpenAPI schema
 openapi_schema = app.openapi()
 
