@@ -1,16 +1,17 @@
 """
-Processing module for video audio transcription and subtitle synchronization.
+Processing module for video audio transcription and subtitle synchronization with RAG + Gemini LLM correction.
 
 This module encapsulates the core business logic for:
 - Extracting audio (optional)
-- Transcribing audio using a pluggable transcriber (Whisper-compatible interface)
+- Transcribing audio using a pluggable transcriber (Whisper/Gemini/stub)
 - Parsing and adjusting subtitle timestamps (SRT/VTT/ASS/SSA)
 - Producing a synchronized subtitle file
+- Performing RAG over the full transcript and fixing each subtitle line with google.genai LLM
 
 Design notes:
 - PUBLIC_INTERFACE methods are provided for use by API layer without exposing internal details.
 - No heavy ML dependencies are mandated here; a stub and an interface are provided. If Whisper is available,
-  wire up WhisperTranscriber to use it.
+  wire up WhisperTranscriber to use it; alternatively, Gemini-based transcriber is available if GEMINI_API_KEY is set.
 - File operations write to a working directory and return paths for the API to serve.
 """
 from __future__ import annotations
@@ -502,6 +503,126 @@ def _clamp_nonnegative(entries: List[SubtitleEntry]) -> List[SubtitleEntry]:
     return out
 
 
+def _format_hms_ms(seconds: float) -> str:
+    """Format seconds into H:MM:SS.mmm for prompts."""
+    seconds = max(0.0, float(seconds))
+    ms = int(round((seconds - int(seconds)) * 1000))
+    s = int(seconds) % 60
+    m = (int(seconds) // 60) % 60
+    h = int(seconds) // 3600
+    return f"{h}:{m:02}:{s:02}.{ms:03}"
+
+
+def _build_gemini_prompt_for_cue(cue_text: str, start: float, end: float, topk: List[Dict[str, Any]]) -> str:
+    """Construct a deterministic prompt for Gemini LLM using top-k transcript segments."""
+    lines: List[str] = []
+    lines.append("You are a helpful assistant that corrects subtitle cues using the most relevant transcript context.")
+    lines.append("Goals:")
+    lines.append("1) Fix wording, typos, casing, punctuation; keep speaker intent.")
+    lines.append("2) Keep the subtitle concise and readable.")
+    lines.append("3) Use the retrieved transcript segments as ground truth where applicable.")
+    lines.append("4) Return ONLY the corrected subtitle line without extra commentary or quotes.")
+    lines.append("")
+    lines.append(f"Cue time: {_format_hms_ms(start)} --> {_format_hms_ms(end)}")
+    lines.append(f"Original cue: {str(cue_text or '').strip()}")
+    lines.append("")
+    lines.append("Top relevant transcript segments:")
+    for i, seg in enumerate(topk[:10], start=1):
+        sstart = _format_hms_ms(float(seg.get("start", 0.0)))
+        send = _format_hms_ms(float(seg.get("end", 0.0)))
+        score = float(seg.get("score", 0.0))
+        text = str(seg.get("text", "")).strip()
+        lines.append(f"{i}. [{sstart} - {send}] (score={score:.3f}) {text}")
+    lines.append("")
+    lines.append("Return only the corrected subtitle text:")
+    return "\n".join(lines)
+
+
+def _gemini_correct_line(prompt: str) -> str:
+    """
+    Call google.genai SDK to complete the prompt and return a single-line corrected subtitle.
+    Falls back to minimal cleanup if SDK or key is missing.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        # Fallback: derive the cue line from prompt and ensure punctuation
+        text = prompt.strip().split("Original cue:", 1)[-1].strip()
+        if "\n" in text:
+            text = text.splitlines()[0].strip()
+        if not text:
+            return ""
+        if text[-1] not in ".?!":
+            text += "."
+        return " ".join(text.split())
+
+    try:
+        from google import genai  # type: ignore
+        from google.genai import types as genai_types  # type: ignore
+    except Exception:
+        # If SDK not installed, use same stub
+        text = prompt.strip().split("Original cue:", 1)[-1].strip()
+        if "\n" in text:
+            text = text.splitlines()[0].strip()
+        if not text:
+            return ""
+        if text[-1] not in ".?!":
+            text += "."
+        return " ".join(text.split())
+
+    client = genai.Client(api_key=api_key)
+    try:
+        result = client.models.generate_content(
+            model="gemini-1.5-pro",
+            contents=[genai_types.Content(role="user", parts=[genai_types.Part.from_text(prompt)])],
+        )
+    except Exception:
+        # On failure, return a minimal cleanup of original
+        text = prompt.strip().split("Original cue:", 1)[-1].strip()
+        if "\n" in text:
+            text = text.splitlines()[0].strip()
+        if not text:
+            return ""
+        if text[-1] not in ".?!":
+            text += "."
+        return " ".join(text.split())
+
+    # Extract text
+    raw = ""
+    try:
+        for cand in getattr(result, "candidates", []) or []:
+            content = getattr(cand, "content", None)
+            if not content:
+                continue
+            for part in getattr(content, "parts", []) or []:
+                if hasattr(part, "text") and part.text:
+                    raw += part.text + "\n"
+    except Exception:
+        pass
+
+    s = (raw or "").strip()
+    # Basic clean to single line
+    if s.startswith("```") and s.endswith("```"):
+        s = s.strip("`").strip()
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if lines:
+        s = lines[-1]
+    s = s.strip('\'"').strip()
+    return " ".join(s.split())
+
+
+def _gemini_correct_entries(subs: List[Tuple[int, float, float, str]], topk_per_cue: List[List[Dict[str, Any]]]) -> List[str]:
+    """
+    For each subtitle cue, build prompt with timestamps and 10 relevant segments,
+    call Gemini LLM via google.genai, and return the corrected line.
+    """
+    corrected: List[str] = []
+    for i, (idx, start, end, text) in enumerate(subs):
+        topk = topk_per_cue[i] if i < len(topk_per_cue) else []
+        prompt = _build_gemini_prompt_for_cue(text, start, end, topk)
+        corrected.append(_gemini_correct_line(prompt))
+    return corrected
+
+
 # PUBLIC_INTERFACE
 def process_and_sync_subtitles(
     video_path: str,
@@ -512,11 +633,15 @@ def process_and_sync_subtitles(
 ) -> Dict[str, Any]:
     """
     Process video and subtitle files:
-    - Transcribe audio using StubTranscriber by default, or Whisper if prefer_whisper=True and available.
+    - Transcribe audio using StubTranscriber by default, Whisper if prefer_whisper=True and available,
+      or Gemini (if GEMINI_API_KEY provided) by selecting prefer_whisper=False and ensuring the
+      caller constructs GeminiGenAITranscriber separately (future enhancement).
     - Parse subtitles
     - Estimate shift using naive approach and apply
     - Write adjusted subtitle to output_dir with suffix '-synced'
     - Persist full transcription segments as 'entries' JSON for later RAG/LLM usage
+    - RAG-based LLM line fixing: for each subtitle cue, retrieve top-10 relevant transcript segments,
+      call google.genai LLM with prompt composed of cue and context, and produce an LLM-corrected variant.
 
     Returns:
     {
@@ -524,7 +649,8 @@ def process_and_sync_subtitles(
       "format": "srt|vtt|ass",
       "shift_seconds": "<float as str>",
       "entries": [ { "start": float, "end": float, "text": str }, ... ],
-      "entries_path": "<absolute path to JSON file with entries>"
+      "entries_path": "<absolute path to JSON file with entries>",
+      "llm_corrected_subtitle_path": "<path or None>"
     }
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -534,7 +660,6 @@ def process_and_sync_subtitles(
         try:
             transcriber = WhisperTranscriber(model_name=whisper_model)
         except TranscriptionError:
-            # Fallback to stub if whisper unavailable
             transcriber = StubTranscriber()
 
     # Transcribe entire video
@@ -546,15 +671,13 @@ def process_and_sync_subtitles(
         for seg in transcript
     ]
 
-    # Also persist to JSON file for downstream RAG steps within same workdir
+    # Persist entries JSON
     entries_path = os.path.join(output_dir, "transcript_entries.json")
     try:
         import json
-
         with open(entries_path, "w", encoding="utf-8") as jf:
             json.dump(entries, jf, ensure_ascii=False, indent=2)
     except Exception:
-        # Do not fail main processing if persistence fails; entries are still returned in-memory.
         entries_path = ""
 
     # Parse subtitle
@@ -582,7 +705,7 @@ def process_and_sync_subtitles(
     shifted = _apply_shift(sub_entries, shift)
     shifted = _clamp_nonnegative(shifted)
 
-    # Format output
+    # Write synced subtitle
     base_name, ext = os.path.splitext(os.path.basename(subtitle_path))
     out_name = f"{base_name}-synced{ext}"
     out_path = os.path.join(output_dir, out_name)
@@ -597,16 +720,26 @@ def process_and_sync_subtitles(
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(content_out)
 
-    # Attempt LLM correction pass with RAG context; write a sibling file if successful.
+    # RAG retrieval: top-10 transcript segments per cue
+    cues_payload = [{"text": s.text, "start": s.start, "end": s.end} for s in shifted]
+    topk_per_cue = retrieve_top_k_for_cues(cues_payload, entries, k=10)
+
+    # LLM correction using google.genai exclusively (Gemini)
     corrected_variant_path = ""
     try:
-        from .correction import correct_subtitles_with_llm, apply_corrected_texts  # local import to avoid cycles
-        # Compute RAG and corrected texts (top-10 segments per cue)
-        corrected_texts, _rag = correct_subtitles_with_llm(shifted, entries, fmt=fmt, k=10)
-        corrected_entries = apply_corrected_texts(shifted, corrected_texts)
+        # Prepare simple tuple list for iteration
+        subs_tuples: List[Tuple[int, float, float, str]] = [(e.index, e.start, e.end, e.text) for e in shifted]
+        corrected_texts = _gemini_correct_entries(subs_tuples, topk_per_cue)
+
+        # Apply corrected texts
+        corrected_entries: List[SubtitleEntry] = []
+        for i, e in enumerate(shifted):
+            new_text = corrected_texts[i] if i < len(corrected_texts) else e.text
+            corrected_entries.append(type(e)(index=e.index, start=e.start, end=e.end, text=str(new_text or "").strip()))
+
         # Write corrected file alongside synced one
-        base_name_noext, ext = os.path.splitext(os.path.basename(out_path))
-        corrected_name = f"{base_name_noext}-llm{ext}"
+        base_name_noext, ext2 = os.path.splitext(os.path.basename(out_path))
+        corrected_name = f"{base_name_noext}-llm{ext2}"
         corrected_variant_path = os.path.join(output_dir, corrected_name)
         if fmt == "srt":
             corrected_content = format_srt(corrected_entries)
@@ -617,16 +750,15 @@ def process_and_sync_subtitles(
         with open(corrected_variant_path, "w", encoding="utf-8") as cf:
             cf.write(corrected_content)
     except Exception:
-        # LLM correction is optional; ignore failures to keep base pipeline robust.
+        # Correction is optional; ignore failures and leave path empty
         corrected_variant_path = ""
 
     return {
         "synced_subtitle_path": out_path,
         "format": fmt,
         "shift_seconds": f"{shift:.3f}",
-        "entries": entries,           # full transcription segments for RAG/LLM
-        "entries_path": entries_path, # persisted JSON location (may be empty if persistence failed)
-        # Expose optional corrected variant path for clients that want it
+        "entries": entries,
+        "entries_path": entries_path,
         "llm_corrected_subtitle_path": corrected_variant_path or None,
     }
 
