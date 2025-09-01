@@ -23,6 +23,9 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import List, Optional, Tuple, Dict, Any
 
+# RAG retrieval utilities
+from .rag import retrieve_top_k_for_cues
+
 # Supported subtitle extensions
 SUPPORTED_SUB_EXTENSIONS = {".srt", ".vtt", ".ass", ".ssa"}
 
@@ -518,3 +521,25 @@ def save_upload(file_bytes: bytes, filename: str, dest_dir: str) -> str:
     with open(out_path, "wb") as f:
         f.write(file_bytes)
     return out_path
+
+
+# PUBLIC_INTERFACE
+def rag_top_k_for_subtitles(
+    subtitle_entries: List[SubtitleEntry],
+    transcript_entries: List[Dict[str, Any]],
+    k: int = 10,
+) -> List[List[Dict[str, Any]]]:
+    """
+    Compute top-k relevant transcript segments for each subtitle cue.
+
+    Parameters:
+        subtitle_entries: Parsed subtitle cues as SubtitleEntry objects.
+        transcript_entries: Full-video transcription 'entries' as returned by process_and_sync_subtitles.
+        k: Number of segments to retrieve for each cue (default 10).
+
+    Returns:
+        List[List[Dict[str, Any]]]: For each subtitle cue, a list of up to k transcript entries
+        augmented with a 'score' field, sorted by descending similarity.
+    """
+    cues = [{"text": s.text, "start": s.start, "end": s.end} for s in subtitle_entries]
+    return retrieve_top_k_for_cues(cues, transcript_entries, k=k)

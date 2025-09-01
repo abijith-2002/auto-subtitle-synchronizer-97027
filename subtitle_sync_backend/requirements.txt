@@ -41,3 +41,6 @@ uvicorn==0.34.0
 uvloop==0.21.0
 watchfiles==1.0.5
 websockets==15.0.1
+# Optional for semantic embeddings. If unavailable, TF-IDF fallback is used.
+sentence-transformers>=2.2.2
+numpy>=1.24.0

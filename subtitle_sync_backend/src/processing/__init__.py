@@ -10,7 +10,10 @@ from .processing import (
     create_workdir,
     save_upload,
     SubtitleSyncError,
+    rag_top_k_for_subtitles,
 )
+from .rag import retrieve_top_k_for_cue, retrieve_top_k_for_cues
+
 __all__ = [
     "BaseTranscriber",
     "StubTranscriber",
@@ -20,4 +23,7 @@ __all__ = [
     "create_workdir",
     "save_upload",
     "SubtitleSyncError",
+    "rag_top_k_for_subtitles",
+    "retrieve_top_k_for_cue",
+    "retrieve_top_k_for_cues",
 ]
