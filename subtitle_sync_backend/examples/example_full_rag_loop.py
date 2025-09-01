@@ -283,13 +283,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--video",
         required=False,
-        default="attachments/2mins.mp4",
+        default=r"../../../attachments/2mins.mp4",
         help="Path to the video file (dummy path acceptable).",
     )
     parser.add_argument(
         "--subtitle",
         required=False,
-        default="attachments/2mins_inaccurate.srt",
+        default=r"../../../attachments/2mins_inaccurate.srt",
         help="Path to the subtitle file (.srt/.vtt/.ass/.ssa).",
     )
     parser.add_argument(
