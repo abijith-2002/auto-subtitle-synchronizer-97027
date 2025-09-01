@@ -92,7 +92,7 @@ def run_test(model: str = "gemini-1.5-flash") -> int:
             file=sys.stderr,
         )
         return 1
-    print("api_key",api_key)
+    # print("api_key",api_key)
     try:
         
         client = genai.Client(api_key=api_key)
@@ -106,7 +106,7 @@ def run_test(model: str = "gemini-1.5-flash") -> int:
             model=model,
             contents=[genai_types.Content(
                 role="user",
-                parts=[genai_types.Part.from_text("Hello, Gemini!")]
+                parts=[genai_types.Part.from_text(text="Hello Gemini")]
             )],
         )
     except Exception as exc:
