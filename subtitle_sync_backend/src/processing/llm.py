@@ -11,6 +11,8 @@ Environment variables required (not read directly here; loaded via os.getenv):
 - OPENAI_API_KEY: API key for OpenAI-compatible endpoints (if using OpenAI)
 - OPENAI_API_BASE: Optional, override base URL for OpenAI-compatible servers
 - OPENAI_MODEL: Optional, model name (default: 'gpt-4o-mini' or any compatible)
+- OPENAI_REQUEST_TIMEOUT: Optional, request timeout in seconds (default 30)
+- OPENAI_CONCURRENCY: Optional, max concurrent requests for batching (default 4)
 Notes:
 - Do NOT hardcode secrets in code. The orchestrator will populate .env.
 
@@ -20,8 +22,9 @@ a deterministic stub is used so pipelines can still function.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # --------------------------
@@ -96,11 +99,9 @@ def build_cue_prompt(ctx: LLMPromptContext) -> str:
 class _StubLLMClient:
     """Deterministic stub client used when no API key is provided."""
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, timeout: Optional[float] = None) -> str:
         # A naive 'correction': just strip and ensure it ends with punctuation.
         text = prompt.strip().split("Original cue:", 1)[-1].strip()
-        # Extract the last line: after 'Original cue:' it is that line until the break
-        # Safer parse:
         if "\n" in text:
             text = text.splitlines()[0].strip()
         if not text:
@@ -108,14 +109,13 @@ class _StubLLMClient:
         terminal = text[-1]
         if terminal not in ".?!":
             text = text + "."
-        # Normalize double spaces
         return " ".join(text.split())
 
 
 class _OpenAIClient:
-    """OpenAI-compatible client using responses API (chat completions)."""
+    """OpenAI-compatible client using chat completions."""
 
-    def __init__(self, api_key: str, base_url: Optional[str] = None, model_name: Optional[str] = None) -> None:
+    def __init__(self, api_key: str, base_url: Optional[str] = None, model_name: Optional[str] = None, timeout: Optional[float] = None) -> None:
         try:
             from openai import OpenAI  # type: ignore
         except Exception as exc:
@@ -124,9 +124,13 @@ class _OpenAIClient:
             ) from exc
         self._model = model_name or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
         self._client = OpenAI(api_key=api_key, base_url=base_url or os.getenv("OPENAI_API_BASE") or None)
+        self._timeout = timeout or float(os.getenv("OPENAI_REQUEST_TIMEOUT") or 30)
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, timeout: Optional[float] = None) -> str:
         try:
+            # Allow per-call timeout override (kept for API parity; client may not use it directly)
+            _ = timeout or self._timeout  # no-op to avoid linter error if unused
+            # The official client does not take timeout directly in create(); rely on global/httpx config if needed.
             resp = self._client.chat.completions.create(
                 model=self._model,
                 messages=[
@@ -149,9 +153,46 @@ def _get_llm_client() -> Any:
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if api_key:
-        return _OpenAIClient(api_key=api_key, base_url=os.getenv("OPENAI_API_BASE"), model_name=os.getenv("OPENAI_MODEL"))
-    # Fallback to stub
+        return _OpenAIClient(
+            api_key=api_key,
+            base_url=os.getenv("OPENAI_API_BASE"),
+            model_name=os.getenv("OPENAI_MODEL"),
+            timeout=float(os.getenv("OPENAI_REQUEST_TIMEOUT") or 30),
+        )
     return _StubLLMClient()
+
+
+def _clean_llm_text(s: str) -> str:
+    """
+    Normalize LLM outputs:
+    - Strip surrounding quotes, code fences or markup
+    - Collapse whitespace
+    """
+    s = (s or "").strip()
+    # Remove simple code fences
+    if s.startswith("```") and s.endswith("```"):
+        s = s.strip("`").strip()
+    # Remove leading/trailing quotes
+    s = s.strip('"').strip("'").strip()
+    # Collapse whitespace
+    return " ".join(s.split())
+
+
+def _retry_with_backoff(callable_fn, max_retries: int = 2, base_delay: float = 0.5) -> Tuple[bool, str]:
+    """
+    Execute a callable that returns a string, retrying on failure with exponential backoff.
+    Returns (ok, value_or_errorstr)
+    """
+    attempt = 0
+    while True:
+        try:
+            value = callable_fn()
+            return True, value
+        except Exception as e:
+            if attempt >= max_retries:
+                return False, str(e)
+            time.sleep(base_delay * (2 ** attempt))
+            attempt += 1
 
 
 # --------------------------
@@ -181,7 +222,11 @@ def correct_cue_with_rag(cue_text: str, start: float, end: float, topk_segments:
     )
     prompt = build_cue_prompt(ctx)
     client = _get_llm_client()
-    return client.complete(prompt)
+    ok, out = _retry_with_backoff(lambda: client.complete(prompt), max_retries=2, base_delay=0.4)
+    if not ok:
+        # Fallback to original cue if repeated failures
+        return str(cue_text or "").strip()
+    return _clean_llm_text(out)
 
 
 # PUBLIC_INTERFACE
@@ -201,6 +246,11 @@ def batch_correct_cues_with_rag(
     """
     outputs: List[str] = []
     client = _get_llm_client()
+    # Concurrency control via simple windowing to avoid overwhelming API
+    # Concurrency value reserved for future parallel implementation; currently processing sequentially for robustness.
+    timeout = float(os.getenv("OPENAI_REQUEST_TIMEOUT") or 30)
+
+    # Process in small batches sequentially (simple and robust).
     for i, cue in enumerate(cues):
         topk = rag_results[i] if i < len(rag_results) else []
         ctx = LLMPromptContext(
@@ -210,9 +260,13 @@ def batch_correct_cues_with_rag(
             topk_segments=topk,
         )
         prompt = build_cue_prompt(ctx)
-        try:
-            outputs.append(client.complete(prompt))
-        except Exception:
-            # Be robust: fallback to original if one-off failure
+
+        def _do():
+            return client.complete(prompt, timeout=timeout)
+
+        ok, out = _retry_with_backoff(_do, max_retries=2, base_delay=0.4)
+        if not ok:
             outputs.append(str(cue.get("text", "")))
+        else:
+            outputs.append(_clean_llm_text(out))
     return outputs

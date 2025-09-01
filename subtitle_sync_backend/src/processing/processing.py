@@ -495,7 +495,7 @@ def process_and_sync_subtitles(
     corrected_variant_path = ""
     try:
         from .correction import correct_subtitles_with_llm, apply_corrected_texts  # local import to avoid cycles
-        # Compute RAG and corrected texts
+        # Compute RAG and corrected texts (top-10 segments per cue)
         corrected_texts, _rag = correct_subtitles_with_llm(shifted, entries, fmt=fmt, k=10)
         corrected_entries = apply_corrected_texts(shifted, corrected_texts)
         # Write corrected file alongside synced one
